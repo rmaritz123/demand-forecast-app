@@ -3,52 +3,30 @@ import pandas as pd
 import numpy as np
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from prophet import Prophet
-import matplotlib.pyplot as plt
-import seaborn as sns
 import warnings
 
 warnings.filterwarnings("ignore")
 
 st.set_page_config(page_title="Demand Forecasting App", layout="centered")
-
-# --- Custom CSS for a clean look ---
-st.markdown("""
-    <style>
-    .main {background-color: #f8fafc;}
-    .block-container {padding-top: 2rem;}
-    .stButton>button {background-color: #2563eb; color: white; border-radius: 6px;}
-    .stDownloadButton>button {background-color: #059669; color: white; border-radius: 6px;}
-    .stSelectbox>div>div>div>div {color: #2563eb;}
-    .stTextInput>div>div>input {border-radius: 6px;}
-    </style>
-""", unsafe_allow_html=True)
-
-st.title("🔮 Demand Forecasting App")
+st.title("📈 Demand Forecasting App")
 
 st.markdown("""
-Welcome!  
-Upload your demand data, select a product, and get a 6-period forecast using several proven methods.  
-**Simple, accurate, and ready for business.**
-
----
+**Instructions:**
+- Upload your Excel or CSV file with columns:  
+  - **Date** (any format)
+  - **Product Code** (SKU)
+  - **Demand** (or Qty, Sales, Volume)
+- Minimum **12 time points per SKU** required.
+- Choose weekly or monthly forecast (if your data allows).
+- The app will run several forecasting methods, show KPIs, and recommend the best one.
 """)
-
-with st.expander("ℹ️ How does this work?"):
-    st.markdown("""
-    1. **Upload** your Excel or CSV file with columns:  
-       - `Date` (any format)
-       - `Product Code` (SKU)
-       - `Demand` (or Qty, Sales, Volume)
-    2. **Select** your product and aggregation level (weekly/monthly).
-    3. The app runs several forecasting methods, compares their accuracy, and recommends the best one.
-    4. **Download** your forecast and see clear, actionable results.
-    """)
 
 file = st.file_uploader("Upload Excel or CSV file", type=["xlsx", "xls", "csv"])
 
 def try_parse_date(series, user_fmt=None):
     if user_fmt:
         return pd.to_datetime(series, format=user_fmt, errors="coerce")
+    # Try common formats
     fmts = ["%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d",
             "%d-%m-%y", "%d/%m/%y", "%Y.%m.%d", "%d.%m.%Y"]
     for fmt in fmts:
@@ -252,16 +230,6 @@ if file:
     best_method = min(kpis, key=lambda m: kpis[m][2] if not np.isnan(kpis[m][2]) else np.inf)
     st.success(f"**Recommended method:** {best_method} (lowest MAPE: {kpis[best_method][2]:.2f}%)")
 
-    # --- Conclusion & Recommendation ---
-    st.markdown(f"""
-    ---
-    ### 📢 Conclusion & Recommendation
-    For SKU **{selected_sku}**, the recommended forecasting method is **{best_method}** because it had the lowest error on your recent data.
-    The forecast for the next 6 periods is shown below.  
-    Use this forecast to guide your planning and inventory decisions.
-    ---
-    """)
-
     # Show table of forecasts
     st.markdown("### 6-Period Forecasts")
     forecast_df = pd.DataFrame({m: results[m] for m in methods})
@@ -273,53 +241,8 @@ if file:
     kpi_df = pd.DataFrame(kpis, index=["MAE", "RMSE", "MAPE"]).T
     st.dataframe(kpi_df.style.format("{:.2f}"))
 
-    # --- Plot: Actual vs Forecast (Recommended Method) ---
-    st.markdown("### 📊 Forecast Plot")
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(data["Date"], data["Demand"], label="Actual", color="#2563eb", marker="o")
-    last_date = data["Date"].iloc[-1]
-    freq = "M" if agg_level == "monthly" else "W"
-    future_dates = pd.date_range(last_date, periods=horizon+1, freq=freq)[1:]
-    ax.plot(future_dates, results[best_method], label="Forecast", color="#f59e42", marker="o")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Demand")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    st.pyplot(fig)
-
-    # --- Histogram of Demand ---
-    st.markdown("### 📈 Demand Distribution (Histogram)")
-    fig2, ax2 = plt.subplots(figsize=(6, 3))
-    sns.histplot(data["Demand"], bins=10, kde=True, color="#2563eb", ax=ax2)
-    ax2.axvline(data["Demand"].mean(), color="#f59e42", linestyle="--", label="Mean")
-    ax2.set_xlabel("Demand")
-    ax2.set_ylabel("Frequency")
-    ax2.legend()
-    st.pyplot(fig2)
-
-    # --- Download ---
+    # Download
     csv = forecast_df.to_csv(index=True).encode()
     st.download_button("Download Forecasts as CSV", csv, "forecast_results.csv")
 
     st.info("Forecasts are for the next 6 periods (months or weeks, as selected). KPIs are calculated on the last 3 periods of your data.")
-
-    # --- Explanations ---
-    st.markdown("---")
-    st.markdown("## ℹ️ Method & KPI Explanations")
-    with st.expander("Forecasting Methods Explained"):
-        st.markdown("""
-        - **Simple Average:** Uses the average of all past values as the forecast.
-        - **Moving Average:** Uses the average of the last 3 periods.
-        - **Exponential Smoothing:** Gives more weight to recent data.
-        - **Linear Trend:** Fits a straight line to the data.
-        - **Seasonal Naive:** Uses the value from the same period last year/season.
-        - **Holt-Winters:** Captures trend and seasonality in the data.
-        - **Prophet:** Advanced model by Meta (Facebook) for trend and seasonality.
-        """)
-    with st.expander("KPI Explanations"):
-        st.markdown("""
-        - **MAE (Mean Absolute Error):** Average of absolute errors between forecast and actual.
-        - **RMSE (Root Mean Squared Error):** Square root of the average squared errors.
-        - **MAPE (Mean Absolute Percentage Error):** Average of absolute percentage errors.
-        - **Lower values mean better accuracy.**
-        """)

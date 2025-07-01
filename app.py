@@ -1,33 +1,45 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from prophet import Prophet
+import warnings
 
-st.set_page_config(page_title="Demand Forecasting Data Uploader", layout="centered")
+warnings.filterwarnings("ignore")
 
-st.title("📈 Demand Forecasting Data Uploader & Validator")
+st.set_page_config(page_title="Demand Forecasting App", layout="centered")
+st.title("📈 Demand Forecasting App")
 
 st.markdown("""
 **Instructions:**
-- Upload your Excel or CSV file containing demand history.
-- Your file should have columns:  
-  - **Date** (any format, e.g. `dd-mm-yyyy`, `yyyy-mm-dd`, etc.)
+- Upload your Excel or CSV file with columns:  
+  - **Date** (any format)
   - **Product Code** (SKU)
-  - **Demand** (can also be called Qty, Sales, or Volume)
+  - **Demand** (or Qty, Sales, Volume)
 - Minimum **12 time points per SKU** required.
-- You can select the aggregation level (monthly or weekly) if your data allows.
-- The app will preview your data and highlight any issues before you proceed.
+- Choose weekly or monthly forecast (if your data allows).
+- The app will run several forecasting methods, show KPIs, and recommend the best one.
 """)
 
-# --- File Upload ---
 file = st.file_uploader("Upload Excel or CSV file", type=["xlsx", "xls", "csv"])
 
+def try_parse_date(series, user_fmt=None):
+    if user_fmt:
+        return pd.to_datetime(series, format=user_fmt, errors="coerce")
+    # Try common formats
+    fmts = ["%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d",
+            "%d-%m-%y", "%d/%m/%y", "%Y.%m.%d", "%d.%m.%Y"]
+    for fmt in fmts:
+        parsed = pd.to_datetime(series, format=fmt, errors="coerce")
+        if parsed.notna().sum() > 0.8 * len(series):
+            return parsed
+    return pd.to_datetime(series, errors="coerce")
+
 if file:
-    # --- Read file ---
     try:
         if file.name.endswith(".csv"):
             df = pd.read_csv(file)
         else:
-            # Try to find the first sheet with 'DemandHistory' in the name, else use first sheet
             xls = pd.ExcelFile(file)
             sheet_name = next((s for s in xls.sheet_names if "demandhistory" in s.replace(" ", "").lower()), xls.sheet_names[0])
             df = pd.read_excel(xls, sheet_name=sheet_name)
@@ -35,65 +47,37 @@ if file:
         st.error(f"❌ Could not read file: {e}")
         st.stop()
 
-    # --- Column Detection ---
-    col_map = {}
-    # Date column (must be 'Date')
-    if "Date" in df.columns:
-        col_map["date"] = "Date"
-    else:
-        st.error("❌ Could not find a 'Date' column. Please ensure your file has a column named 'Date'.")
+    # Column detection
+    if "Date" not in df.columns or "Product Code" not in df.columns:
+        st.error("❌ File must have 'Date' and 'Product Code' columns.")
         st.stop()
-    # SKU/Product Code column (must be 'Product Code')
-    if "Product Code" in df.columns:
-        col_map["sku"] = "Product Code"
-    else:
-        st.error("❌ Could not find a 'Product Code' column. Please ensure your file has a column named 'Product Code'.")
-        st.stop()
-    # Demand column (try to auto-detect, else let user pick)
     demand_candidates = [c for c in df.columns if c.strip().lower() in ["demand", "qty", "sales", "volume"]]
     if demand_candidates:
-        col_map["demand"] = demand_candidates[0]
+        demand_col = demand_candidates[0]
     else:
-        st.warning("⚠️ Could not auto-detect the demand column. Please select it below.")
         demand_col = st.selectbox("Select the demand column", df.columns)
-        col_map["demand"] = demand_col
-
-    # --- Date Parsing ---
-    date_sample = df[col_map["date"]].dropna().astype(str).iloc[0]
-    date_formats = [
-        "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d",
-        "%d-%m-%y", "%d/%m/%y", "%Y.%m.%d", "%d.%m.%Y"
-    ]
-    parsed = False
-    for fmt in date_formats:
-        try:
-            pd.to_datetime(date_sample, format=fmt)
-            date_format = fmt
-            parsed = True
-            break
-        except Exception:
-            continue
-    if not parsed:
-        st.warning(f"⚠️ Could not auto-detect date format. Example value: `{date_sample}`")
-        date_format = st.text_input("Enter the date format (e.g. `%d-%m-%Y`):", value="%d-%m-%Y")
-    # Try to parse all dates
-    try:
-        df["__parsed_date"] = pd.to_datetime(df[col_map["date"]], format=date_format, errors="raise")
-    except Exception as e:
-        st.error(f"❌ Date parsing failed: {e}. Please check your date format and data.")
+    # Date parsing
+    date_sample = df["Date"].dropna().astype(str).iloc[0]
+    parsed_dates = try_parse_date(df["Date"])
+    if parsed_dates.isna().sum() > 0.2 * len(parsed_dates):
+        st.warning(f"⚠️ Could not auto-detect date format. Example: `{date_sample}`")
+        user_fmt = st.text_input("Enter the date format (e.g. `%d-%m-%Y`):", value="%d-%m-%Y")
+        parsed_dates = try_parse_date(df["Date"], user_fmt)
+    df["__parsed_date"] = parsed_dates
+    if df["__parsed_date"].isna().any():
+        st.error("❌ Some dates could not be parsed. Please check your date format.")
         st.stop()
-
-    # --- Demand Column Validation ---
+    # Demand column
     try:
-        df["__demand"] = pd.to_numeric(df[col_map["demand"]], errors="raise")
+        df["__demand"] = pd.to_numeric(df[demand_col], errors="raise")
     except Exception as e:
-        st.error(f"❌ Demand column parsing failed: {e}. Please check your demand data.")
+        st.error(f"❌ Demand column parsing failed: {e}")
         st.stop()
-
-    # --- Data Granularity Detection ---
-    df = df.dropna(subset=["__parsed_date", col_map["sku"], "__demand"])
+    # Clean and sort
+    df = df.dropna(subset=["__parsed_date", "Product Code", "__demand"])
     df = df.sort_values(["Product Code", "__parsed_date"])
-    date_diffs = df.groupby(col_map["sku"])["__parsed_date"].diff().dropna().dt.days
+    # Granularity detection
+    date_diffs = df.groupby("Product Code")["__parsed_date"].diff().dropna().dt.days
     most_common_diff = date_diffs.mode().iloc[0] if not date_diffs.empty else None
     if most_common_diff is not None:
         if 25 <= most_common_diff <= 35:
@@ -106,10 +90,7 @@ if file:
             granularity = "unknown"
     else:
         granularity = "unknown"
-
     st.info(f"Detected data granularity: **{granularity.capitalize()}** (most common interval: {most_common_diff} days)" if most_common_diff else "Could not detect data granularity.")
-
-    # --- Aggregation Option ---
     agg_level = "monthly"
     if granularity in ["daily", "weekly"]:
         agg_level = st.selectbox("Choose forecast aggregation level", ["monthly", "weekly"])
@@ -117,47 +98,151 @@ if file:
         agg_level = "monthly"
     else:
         agg_level = st.selectbox("Choose forecast aggregation level", ["monthly", "weekly"])
-
-    # --- Aggregate Data ---
+    # Aggregate
     df["__month"] = df["__parsed_date"].dt.to_period("M").dt.to_timestamp()
     df["__week"] = df["__parsed_date"].dt.to_period("W").dt.start_time
-    if agg_level == "monthly":
-        group_col = "__month"
-    else:
-        group_col = "__week"
-
-    # --- Preview and Validation ---
-    st.subheader("Data Preview")
-    st.dataframe(df[[col_map["sku"], col_map["date"], col_map["demand"], "__parsed_date"]].head(20))
-
-    # Validation: missing values, negative/zero demand, min 12 points per SKU
+    group_col = "__month" if agg_level == "monthly" else "__week"
+    # Validation
     errors = []
     if df.isnull().any().any():
         errors.append("Some values are missing.")
     if (df["__demand"] <= 0).any():
         errors.append("Some demand values are zero or negative.")
-    sku_counts = df.groupby(col_map["sku"])[group_col].nunique()
+    sku_counts = df.groupby("Product Code")[group_col].nunique()
     skus_too_short = sku_counts[sku_counts < 12].index.tolist()
     if skus_too_short:
         errors.append(f"These SKUs have less than 12 data points: {', '.join(map(str, skus_too_short))}")
-
     if errors:
         st.error("❌ Data validation failed:\n- " + "\n- ".join(errors))
         st.stop()
     else:
-        st.success("✅ Data validation passed! You can proceed to forecasting in the next step.")
+        st.success("✅ Data validation passed! Proceed to forecasting below.")
 
-    # --- SKU Selection with Search ---
-    st.subheader("SKU Selection")
-    sku_list = sorted(df[col_map["sku"]].unique())
+    # SKU selection
+    sku_list = sorted(df["Product Code"].unique())
     search = st.text_input("Search for a Product Code (SKU):")
     filtered_skus = [sku for sku in sku_list if search.lower() in str(sku).lower()]
     selected_sku = st.selectbox("Select SKU", filtered_skus if filtered_skus else sku_list)
-
-    # --- Show Aggregated Data Preview for Selected SKU ---
-    st.subheader(f"Aggregated Data Preview for {selected_sku}")
-    sku_df = df[df[col_map["sku"]] == selected_sku]
+    sku_df = df[df["Product Code"] == selected_sku]
     agg_df = sku_df.groupby(group_col)["__demand"].sum().reset_index()
+    agg_df = agg_df.rename(columns={group_col: "Date", "__demand": "Demand"})
+    st.subheader(f"Aggregated Data Preview for {selected_sku}")
     st.dataframe(agg_df.head(20))
 
-    st.info("Ready for forecasting! (This is just the data handling/validation prototype.)")
+    # Forecasting
+    st.subheader("Forecasting Results")
+    data = agg_df.copy()
+    data = data.sort_values("Date")
+    data = data.reset_index(drop=True)
+    # Use last 3 periods as test, rest as train
+    if len(data) < 15:
+        st.warning("Not enough data for robust backtesting. Forecasts will use all available data.")
+        train, test = data, pd.DataFrame()
+    else:
+        train, test = data.iloc[:-3], data.iloc[-3:]
+    horizon = 6
+
+    def simple_average(train, horizon):
+        avg = train["Demand"].mean()
+        return [avg] * horizon
+
+    def moving_average(train, horizon, window=3):
+        arr = list(train["Demand"])
+        forecast = []
+        for _ in range(horizon):
+            avg = np.mean(arr[-window:])
+            forecast.append(avg)
+            arr.append(avg)
+        return forecast
+
+    def exp_smoothing(train, horizon, alpha=0.3):
+        forecast = train["Demand"].iloc[0]
+        for val in train["Demand"].iloc[1:]:
+            forecast = alpha * val + (1 - alpha) * forecast
+        return [forecast] * horizon
+
+    def linear_trend(train, horizon):
+        n = len(train)
+        x = np.arange(1, n+1)
+        y = np.array(train["Demand"])
+        A = np.vstack([x, np.ones(n)]).T
+        m, c = np.linalg.lstsq(A, y, rcond=None)[0]
+        return [m * (n + i + 1) + c for i in range(horizon)]
+
+    def seasonal_naive(train, horizon, season_length=12):
+        if len(train) < season_length:
+            season_length = max(1, len(train))
+        last_season = train["Demand"].values[-season_length:]
+        return [last_season[i % season_length] for i in range(horizon)]
+
+    def holt_winters(train, horizon):
+        if len(train) < 2:
+            return [train["Demand"].mean()] * horizon
+        try:
+            model = ExponentialSmoothing(train["Demand"], trend="add", seasonal="add", seasonal_periods=12 if len(train) >= 24 else None)
+            fit = model.fit()
+            return fit.forecast(horizon)
+        except Exception:
+            return [train["Demand"].mean()] * horizon
+
+    def prophet_forecast(train, horizon):
+        dfp = train.rename(columns={"Date": "ds", "Demand": "y"})
+        m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
+        m.fit(dfp)
+        future = m.make_future_dataframe(periods=horizon, freq="M" if agg_level == "monthly" else "W")
+        forecast = m.predict(future)
+        return forecast["yhat"].iloc[-horizon:].values
+
+    def calc_kpis(actual, forecast):
+        n = min(len(actual), len(forecast))
+        actual, forecast = np.array(actual[:n]), np.array(forecast[:n])
+        mae = np.mean(np.abs(actual - forecast))
+        rmse = np.sqrt(np.mean((actual - forecast) ** 2))
+        mape = np.mean(np.abs((actual - forecast) / actual)) * 100 if np.all(actual != 0) else np.nan
+        return mae, rmse, mape
+
+    methods = {
+        "Simple Average": lambda tr, h: simple_average(tr, h),
+        "Moving Average": lambda tr, h: moving_average(tr, h),
+        "Exp. Smoothing": lambda tr, h: exp_smoothing(tr, h),
+        "Linear Trend": lambda tr, h: linear_trend(tr, h),
+        "Seasonal Naive": lambda tr, h: seasonal_naive(tr, h, season_length=12 if agg_level == "monthly" else 52),
+        "Holt-Winters": lambda tr, h: holt_winters(tr, h),
+        "Prophet": lambda tr, h: prophet_forecast(tr, h)
+    }
+
+    results = {}
+    kpis = {}
+    for name, func in methods.items():
+        try:
+            forecast = func(train, horizon)
+            results[name] = forecast
+            if not test.empty:
+                test_forecast = func(train, len(test))
+                kpis[name] = calc_kpis(test["Demand"], test_forecast)
+            else:
+                kpis[name] = (np.nan, np.nan, np.nan)
+        except Exception as e:
+            results[name] = [np.nan] * horizon
+            kpis[name] = (np.nan, np.nan, np.nan)
+
+    # Recommendation
+    best_method = min(kpis, key=lambda m: kpis[m][2] if not np.isnan(kpis[m][2]) else np.inf)
+    st.success(f"**Recommended method:** {best_method} (lowest MAPE: {kpis[best_method][2]:.2f}%)")
+
+    # Show table of forecasts
+    st.markdown("### 6-Period Forecasts")
+    forecast_df = pd.DataFrame({m: results[m] for m in methods})
+    forecast_df.index = [f"Period {i+1}" for i in range(horizon)]
+    st.dataframe(forecast_df)
+
+    # Show KPIs
+    st.markdown("### Model KPIs (on last 3 periods)")
+    kpi_df = pd.DataFrame(kpis, index=["MAE", "RMSE", "MAPE"]).T
+    st.dataframe(kpi_df.style.format("{:.2f}"))
+
+    # Download
+    csv = forecast_df.to_csv(index=True).encode()
+    st.download_button("Download Forecasts as CSV", csv, "forecast_results.csv")
+
+    st.info("Forecasts are for the next 6 periods (months or weeks, as selected). KPIs are calculated on the last 3 periods of your data.")

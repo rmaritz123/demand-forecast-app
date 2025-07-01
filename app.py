@@ -65,76 +65,42 @@ if file:
             xls = pd.ExcelFile(file)
             sheet_name = next((s for s in xls.sheet_names if "demandhistory" in s.replace(" ", "").lower()), xls.sheet_names[0])
             df = pd.read_excel(xls, sheet_name=sheet_name)
-        st.write("✅ File uploaded and read successfully. Columns:", df.columns.tolist())
-        st.write("📊 Data shape:", df.shape)
-        st.write("🔍 First 3 rows:", df.head(3))
     except Exception as e:
         st.error(f"❌ Could not read file: {e}")
         st.stop()
 
     # Column detection
-    st.write("🔍 Starting column detection...")
     if "Date" not in df.columns or "Product Code" not in df.columns:
         st.error("❌ File must have 'Date' and 'Product Code' columns.")
-        st.write("Available columns:", df.columns.tolist())
         st.stop()
-    
     demand_candidates = [c for c in df.columns if c.strip().lower() in ["demand", "qty", "sales", "volume"]]
     if demand_candidates:
         demand_col = demand_candidates[0]
-        st.write("✅ Auto-detected demand column:", demand_col)
     else:
-        st.write("⚠️ Could not auto-detect demand column. Available columns:", df.columns.tolist())
         demand_col = st.selectbox("Select the demand column", df.columns)
-        st.write("✅ User selected demand column:", demand_col)
-
     # Date parsing
-    st.write("🔍 Starting date parsing...")
     date_sample = df["Date"].dropna().astype(str).iloc[0]
-    st.write("📅 Date sample:", date_sample)
     parsed_dates = try_parse_date(df["Date"])
-    st.write("📅 Parsed dates (first 5):", parsed_dates.head())
-    st.write("📅 Number of successfully parsed dates:", parsed_dates.notna().sum(), "out of", len(parsed_dates))
-    
     if parsed_dates.isna().sum() > 0.2 * len(parsed_dates):
         st.warning(f"⚠️ Could not auto-detect date format. Example: `{date_sample}`")
         user_fmt = st.text_input("Enter the date format (e.g. `%d-%m-%Y`):", value="%d-%m-%Y")
-        if user_fmt:
-            parsed_dates = try_parse_date(df["Date"], user_fmt)
-            st.write("📅 Re-parsed dates (first 5):", parsed_dates.head())
-    
+        parsed_dates = try_parse_date(df["Date"], user_fmt)
     df["__parsed_date"] = parsed_dates
     if df["__parsed_date"].isna().any():
         st.error("❌ Some dates could not be parsed. Please check your date format.")
-        st.write("Unparsed dates:", df[df["__parsed_date"].isna()]["Date"].head())
         st.stop()
-
-    # Demand column parsing
-    st.write("🔍 Starting demand column parsing...")
+    # Demand column
     try:
         df["__demand"] = pd.to_numeric(df[demand_col], errors="raise")
-        st.write("✅ Demand column parsed successfully")
-        st.write("📊 Demand stats:", df["__demand"].describe())
     except Exception as e:
         st.error(f"❌ Demand column parsing failed: {e}")
-        st.write("Sample demand values:", df[demand_col].head())
         st.stop()
-
     # Clean and sort
-    st.write("🔍 Cleaning and sorting data...")
-    original_rows = len(df)
     df = df.dropna(subset=["__parsed_date", "Product Code", "__demand"])
     df = df.sort_values(["Product Code", "__parsed_date"])
-    st.write(f"✅ Data cleaned. Rows: {original_rows} → {len(df)}")
-    st.write("🔍 Cleaned data (first 5):", df[["Product Code", "__parsed_date", "__demand"]].head())
-
     # Granularity detection
-    st.write("🔍 Detecting data granularity...")
     date_diffs = df.groupby("Product Code")["__parsed_date"].diff().dropna().dt.days
     most_common_diff = date_diffs.mode().iloc[0] if not date_diffs.empty else None
-    st.write("📊 Date differences (days):", date_diffs.value_counts().head())
-    st.write("📊 Most common difference:", most_common_diff, "days")
-    
     if most_common_diff is not None:
         if 25 <= most_common_diff <= 35:
             granularity = "monthly"
@@ -146,10 +112,7 @@ if file:
             granularity = "unknown"
     else:
         granularity = "unknown"
-    
-    st.write("✅ Detected granularity:", granularity)
     st.info(f"Detected data granularity: **{granularity.capitalize()}** (most common interval: {most_common_diff} days)" if most_common_diff else "Could not detect data granularity.")
-    
     agg_level = "monthly"
     if granularity in ["daily", "weekly"]:
         agg_level = st.selectbox("Choose forecast aggregation level", ["monthly", "weekly"])
@@ -157,30 +120,20 @@ if file:
         agg_level = "monthly"
     else:
         agg_level = st.selectbox("Choose forecast aggregation level", ["monthly", "weekly"])
-    st.write("✅ Selected aggregation level:", agg_level)
-
     # Aggregate
-    st.write("🔍 Aggregating data...")
     df["__month"] = df["__parsed_date"].dt.to_period("M").dt.to_timestamp()
     df["__week"] = df["__parsed_date"].dt.to_period("W").dt.start_time
     group_col = "__month" if agg_level == "monthly" else "__week"
-    st.write("✅ Using group column:", group_col)
-
     # Validation
-    st.write("🔍 Validating data...")
     errors = []
     if df.isnull().any().any():
         errors.append("Some values are missing.")
     if (df["__demand"] <= 0).any():
         errors.append("Some demand values are zero or negative.")
-        st.write("Zero/negative demand values:", df[df["__demand"] <= 0]["__demand"].head())
-    
     sku_counts = df.groupby("Product Code")[group_col].nunique()
-    st.write("📊 SKU data point counts:", sku_counts.head())
     skus_too_short = sku_counts[sku_counts < 12].index.tolist()
     if skus_too_short:
         errors.append(f"These SKUs have less than 12 data points: {', '.join(map(str, skus_too_short))}")
-    
     if errors:
         st.error("❌ Data validation failed:\n- " + "\n- ".join(errors))
         st.stop()
@@ -188,37 +141,27 @@ if file:
         st.success("✅ Data validation passed! Proceed to forecasting below.")
 
     # SKU selection
-    st.write("🔍 Setting up SKU selection...")
     sku_list = sorted(df["Product Code"].unique())
-    st.write("📊 Available SKUs:", len(sku_list), "total")
     search = st.text_input("Search for a Product Code (SKU):")
     filtered_skus = [sku for sku in sku_list if search.lower() in str(sku).lower()]
     selected_sku = st.selectbox("Select SKU", filtered_skus if filtered_skus else sku_list)
-    st.write("✅ Selected SKU:", selected_sku)
-    
     sku_df = df[df["Product Code"] == selected_sku]
     agg_df = sku_df.groupby(group_col)["__demand"].sum().reset_index()
     agg_df = agg_df.rename(columns={group_col: "Date", "__demand": "Demand"})
-    st.write("✅ Aggregated data for selected SKU:", agg_df.shape)
     st.subheader(f"Aggregated Data Preview for {selected_sku}")
     st.dataframe(agg_df.head(20))
 
     # Forecasting
-    st.write("🔍 Starting forecasting...")
     st.subheader("Forecasting Results")
     data = agg_df.copy()
     data = data.sort_values("Date")
     data = data.reset_index(drop=True)
-    st.write("📊 Final data for forecasting:", data.shape)
-    
     # Use last 3 periods as test, rest as train
     if len(data) < 15:
         st.warning("Not enough data for robust backtesting. Forecasts will use all available data.")
         train, test = data, pd.DataFrame()
     else:
         train, test = data.iloc[:-3], data.iloc[-3:]
-    st.write("📊 Train/test split:", f"Train: {len(train)}, Test: {len(test)}")
-    
     horizon = 6
 
     def simple_average(train, horizon):
@@ -290,11 +233,9 @@ if file:
         "Prophet": lambda tr, h: prophet_forecast(tr, h)
     }
 
-    st.write("🔍 Running forecasting methods...")
     results = {}
     kpis = {}
     for name, func in methods.items():
-        st.write(f"Running {name}...")
         try:
             forecast = func(train, horizon)
             results[name] = forecast
@@ -303,16 +244,12 @@ if file:
                 kpis[name] = calc_kpis(test["Demand"], test_forecast)
             else:
                 kpis[name] = (np.nan, np.nan, np.nan)
-            st.write(f"✅ {name} completed")
         except Exception as e:
-            st.write(f"❌ {name} failed: {e}")
             results[name] = [np.nan] * horizon
             kpis[name] = (np.nan, np.nan, np.nan)
 
     # Recommendation
-    st.write("🔍 Determining best method...")
     best_method = min(kpis, key=lambda m: kpis[m][2] if not np.isnan(kpis[m][2]) else np.inf)
-    st.write("✅ Best method:", best_method)
     st.success(f"**Recommended method:** {best_method} (lowest MAPE: {kpis[best_method][2]:.2f}%)")
 
     # --- Conclusion & Recommendation ---

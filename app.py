@@ -100,4 +100,4 @@ if file:
     df = df.sort_values(["Product Code", "__parsed_date"])
     # Granularity detection
     date_diffs = df.groupby("Product Code")["__parsed_date"].diff().dropna().dt.days
-    most_common_diff = date_diffs.mode().iloc[0] i
+    most_common_diff = date_diffs.mode().iloc[0]
